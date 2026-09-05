@@ -1,0 +1,255 @@
+<!DOCTYPE html>
+<html lang="zh"><head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>jobradar · 全部可申请职位</title>
+<style>
+  :root{ --ink:#1a1a1a; --mut:#777; --line:#e6e6e2; --accent:#1a6b3a; }
+  *{ box-sizing:border-box; }
+  body{ font-family:-apple-system,BlinkMacSystemFont,'Segoe UI','Songti SC',Georgia,serif;
+        color:var(--ink); margin:0; background:#fafaf8; line-height:1.5; }
+  header{ background:#2c2c2c; color:#fff; padding:14px 16px; }
+  header h1{ font-size:16px; margin:0; letter-spacing:1px; font-weight:normal; }
+  header .sub{ font-size:12px; color:#bbb; margin-top:4px; }
+  .filters{ position:sticky; top:0; z-index:5; background:#fff; border-bottom:1px solid var(--line);
+            padding:10px 12px; display:flex; flex-wrap:wrap; gap:8px; align-items:center; }
+  .filters input[type=text], .filters input[type=number], .filters select{
+            font-size:13px; padding:6px 8px; border:1px solid #ccc; border-radius:4px; background:#fff; }
+  .filters input[type=text]{ flex:1 1 180px; min-width:140px; }
+  .filters label{ font-size:12px; color:#444; display:inline-flex; align-items:center; gap:4px; }
+  .count{ font-size:12px; color:var(--mut); padding:8px 14px; }
+  .list{ padding:0 8px 60px; }
+  .card{ background:#fff; border:1px solid var(--line); border-radius:6px;
+         padding:11px 13px; margin:8px auto; max-width:860px; }
+  .card .t{ font-size:15px; color:#111; margin-bottom:3px; }
+  .card .t a{ color:#111; text-decoration:none; }
+  .card .t a:hover{ text-decoration:underline; }
+  .card .m{ font-size:12px; color:#555; margin-bottom:3px; }
+  .card .f{ font-size:11px; color:#999; }
+  .card .f a{ color:var(--accent); }
+  .pill{ display:inline-block; font-size:10px; letter-spacing:.3px; padding:1px 5px;
+         border-radius:3px; margin-left:5px; vertical-align:middle; border:1px solid #ddd; color:#555; background:#f3f3f1; }
+  .pill.jr{ color:#1a6b3a; background:#eef7f0; border-color:#cde6d6; }
+  .pill.new{ color:#c0392b; background:#fff; border-color:#c0392b; }
+  .pill.rel{ color:#7a5c00; background:#fbf6e6; border-color:#ece0bf; }
+  .pill.sal{ color:#1a4d7a; background:#eaf2fa; border-color:#c5dcf0; }
+  .pill.soon{ color:#a33; background:#fdecea; border-color:#f2c2bd; }
+  .more{ display:block; margin:18px auto; padding:10px 18px; font-size:14px;
+         background:#2c2c2c; color:#fff; border:none; border-radius:5px; cursor:pointer; }
+  .loading{ text-align:center; color:var(--mut); padding:30px; font-size:13px; }
+</style></head>
+<body>
+<header>
+  <h1>jobradar · 全部可申请职位</h1>
+  <div class="sub">更新于 2026-09-04 17:59 · junior / 实习 / 正相关 优先 · 有截止日留到截止，无截止留 30 天</div>
+</header>
+<div class="filters">
+  <input type="text" id="q" placeholder="搜索 职位 / 公司 关键词…">
+  <select id="country"><option value="">全部地区</option></select>
+  <select id="industry"><option value="">全部行业</option></select>
+  <select id="tier"><option value="">全部签证</option></select>
+  <input type="number" id="minsal" placeholder="最低年薪 CAD" style="width:120px">
+  <label><input type="checkbox" id="jr"> 仅 junior/实习</label>
+  <label><input type="checkbox" id="newonly"> 仅今日新出</label>
+  <label><input type="checkbox" id="soononly"> 仅3天内到期</label>
+  <select id="sort">
+    <option value="best">排序：最相关</option>
+    <option value="new">最新优先</option>
+    <option value="sal">薪资高优先</option>
+  </select>
+</div>
+<div class="count" id="count">加载中…</div>
+<div class="list" id="list"></div>
+
+<script>
+// Lazy loading: first paint needs only manifest + shard 0 (instant); the rest
+// of the shards stream in the background and the count/filter update live.
+const PAGE = 100;
+let MF = null, ALL = [], shardIdx = 0, filtered = [], shown = 0;
+
+function val(id){ return document.getElementById(id).value; }
+function esc(s){ return (s==null?'':String(s)).replace(/[&<>"]/g, c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])); }
+
+// Region menu — Canadian sub-regions float to the top, then all-Canada, then
+// Online (remote), then every other country (alphabetical from the manifest).
+const CA_NAME = '🍁 加拿大', REMOTE_NAME = '💻 Remote / 全球线上';
+const CA_GROUPS = {
+  'ca-bc':          {label:'🍁 BC 不列颠哥伦比亚',                    prov:['BC']},
+  'ca-prairies':    {label:'🍁 草原省份 (AB·SK·MB)',                 prov:['AB','SK','MB']},
+  'ca-on':          {label:'🍁 安大略 ON',                           prov:['ON']},
+  'ca-qc-atlantic': {label:'🍁 魁北克+大西洋省份 (QC·NB·NS·PE·NL)',   prov:['QC','NB','NS','PE','NL']},
+};
+const CA_ORDER = ['ca-bc','ca-prairies','ca-on','ca-qc-atlantic'];
+function regionMatch(r, v){
+  if(!v) return true;
+  if(v==='online')  return r.cc==='REMOTE';
+  if(v==='ca-all')  return r.cc==='CA';
+  if(CA_GROUPS[v])  return r.cc==='CA' && CA_GROUPS[v].prov.indexOf(r.pr)>=0;
+  return r.cn===v;            // a country name (cn, emoji-prefixed)
+}
+// Canonical industry buckets (see core/industry_taxonomy.py). The site `ind`
+// field is already canonicalized server-side, so this is a small fixed set.
+const IND_CN = {
+  'it':'互联网/IT','ai':'人工智能','data':'数据分析','security':'网络安全',
+  'finance':'金融','ecom':'电商/零售/广告','health':'医疗健康','aviation':'航空航天',
+  'gov':'政府/公共/公用','industrial':'能源/工业/制造','transport':'交通/物流',
+  'realestate':'房地产','prof':'专业服务/咨询','education':'教育',
+  'consumer':'媒体/酒店/餐饮','tobacco':'烟草/电子烟','other':'其他',
+};
+function fillIndustries(){
+  const sel = document.getElementById('industry');
+  (MF.industries||[]).forEach(c=>{
+    if(!c) return;
+    const o=document.createElement('option');
+    o.value=c; o.textContent=(IND_CN[c]||c);  // value stays the raw code for filtering
+    sel.appendChild(o);
+  });
+}
+function fillRegions(){
+  const sel = document.getElementById('country');
+  const provs = new Set(MF.ca_provinces||[]);
+  const add = (v,t)=>{ const o=document.createElement('option'); o.value=v; o.textContent=t; sel.appendChild(o); };
+  // 1) Canadian sub-regions (only those with data)
+  CA_ORDER.forEach(k=>{ if(CA_GROUPS[k].prov.some(p=>provs.has(p))) add(k, CA_GROUPS[k].label); });
+  // 2) whole Canada
+  const countries = MF.countries||[];
+  if(countries.indexOf(CA_NAME)>=0) add('ca-all', '🍁 整个加拿大（全部省份）');
+  // 3) Online / 远程
+  if(countries.indexOf(REMOTE_NAME)>=0) add('online', REMOTE_NAME);
+  // 4) every other country, as-is
+  countries.forEach(c=>{ if(c && c!=='?' && c!==CA_NAME && c!==REMOTE_NAME) add(c, c); });
+}
+
+// 截止日期在 0~3 天内（含今天，未过期）→ 用于"3天内到期"标记/筛选。
+function expSoon(r){
+  if(!r.x) return false;
+  const d = new Date(r.x + 'T00:00:00');
+  if(isNaN(d.getTime())) return false;
+  const now = new Date(); now.setHours(0,0,0,0);
+  const days = Math.floor((d - now)/86400000);
+  return days >= 0 && days <= 3;
+}
+
+function card(r){
+  const pills = [];
+  if(r.new) pills.push('<span class="pill new">NEW</span>');
+  if(r.jr)  pills.push('<span class="pill jr">Junior</span>');
+  if(r.rel) pills.push('<span class="pill rel">适合你</span>');
+  if(expSoon(r)) pills.push('<span class="pill soon">⏰3天内截止</span>');
+  if(r.sal) pills.push('<span class="pill sal">'+esc(r.sal)+'</span>');
+  const meta = [esc(r.co), esc(r.cn), esc(IND_CN[r.ind]||r.ind), r.loc?('📍 '+esc(r.loc)):''].filter(Boolean).join(' · ');
+  const foot = [r.p?('发布 '+esc(r.p)):'', r.x?('截止 '+esc(r.x)):'',
+                '<a href="'+esc(r.u)+'" target="_blank" rel="noopener">查看 →</a>'].filter(Boolean).join(' · ');
+  return '<div class="card"><div class="t"><a href="'+esc(r.u)+'" target="_blank" rel="noopener">'
+       + esc(r.t)+'</a>'+pills.join('')+'</div><div class="m">'+meta+'</div><div class="f">'+foot+'</div></div>';
+}
+
+function computeFiltered(){
+  const q = val('q').trim().toLowerCase();
+  const cc = val('country'), ind = val('industry'), tier = val('tier');
+  const minsal = parseFloat(val('minsal')) || 0;
+  const jrOnly = document.getElementById('jr').checked;
+  const newOnly = document.getElementById('newonly').checked;
+  const soonOnly = document.getElementById('soononly').checked;
+  const sort = val('sort');
+  let out = ALL.filter(r=>{
+    if(q && !((r.t||'').toLowerCase().includes(q) || (r.co||'').toLowerCase().includes(q))) return false;
+    if(cc && !regionMatch(r, cc)) return false;
+    if(ind && r.ind!==ind) return false;
+    if(tier && r.tl!==tier) return false;
+    if(minsal && !((r.salc||0) >= minsal)) return false;
+    if(jrOnly && !r.jr) return false;
+    if(newOnly && !r.new) return false;
+    if(soonOnly && !expSoon(r)) return false;
+    return true;
+  });
+  if(sort==='new') out.sort((a,b)=> String(b.fs||'').localeCompare(String(a.fs||'')));
+  else if(sort==='sal') out.sort((a,b)=> (b.salc||0)-(a.salc||0));
+  // 'best' keeps the server-side priority order (shards are pre-sorted best-first)
+  return out;
+}
+
+function updateCount(){
+  const total = MF ? MF.total : ALL.length;
+  let s = filtered.length.toLocaleString() + ' / ' + total.toLocaleString() + ' 个职位';
+  if(MF && shardIdx < MF.shards.length) s += ' · 后台加载中 '+shardIdx+'/'+MF.shards.length+'…';
+  document.getElementById('count').textContent = s;
+}
+
+function renderMoreBtn(){
+  const list = document.getElementById('list');
+  const old = document.getElementById('moreBtn'); if(old) old.remove();
+  if(shown < filtered.length){
+    const b = document.createElement('button');
+    b.id='moreBtn'; b.className='more';
+    b.textContent='显示更多（剩 '+(filtered.length-shown).toLocaleString()+'）';
+    b.onclick=renderPage; list.appendChild(b);
+  }
+}
+
+function renderPage(){
+  const list = document.getElementById('list');
+  const slice = filtered.slice(shown, shown+PAGE);
+  list.insertAdjacentHTML('beforeend', slice.map(card).join(''));
+  shown += slice.length;
+  renderMoreBtn();
+}
+
+// Full reset render (filter/sort changed, or first paint).
+function applyFilters(){
+  filtered = computeFiltered();
+  shown = 0;
+  document.getElementById('list').innerHTML = '';
+  renderPage();
+  updateCount();
+}
+
+function fillSelect(id, vals){
+  const sel = document.getElementById(id);
+  vals.forEach(v=>{ if(v && v!=='?'){ const o=document.createElement('option'); o.value=v; o.textContent=v; sel.appendChild(o);} });
+}
+
+async function loadShard(){
+  if(!MF || shardIdx >= MF.shards.length) return false;
+  const name = MF.shards[shardIdx++];
+  try{
+    const part = await fetch(name,{cache:'no-store'}).then(r=>r.json());
+    ALL = ALL.concat(part);
+  }catch(e){ /* skip a bad shard, keep going */ }
+  return true;
+}
+
+// Stream remaining shards in the background. Refreshes the filtered set + count
+// live; new (lower-priority) rows append at the end, so what's already on screen
+// never jumps. The 更多 button count stays current as data arrives.
+async function backgroundLoad(){
+  while(MF && shardIdx < MF.shards.length){
+    await loadShard();
+    filtered = computeFiltered();
+    updateCount();
+    renderMoreBtn();
+    await new Promise(r=> setTimeout(r, 0));  // yield to keep the UI responsive
+  }
+  updateCount();
+}
+
+async function boot(){
+  try{
+    MF = await (await fetch('manifest.json',{cache:'no-store'})).json();
+    fillRegions();
+    fillSelect('industry', MF.industries||[]);
+    fillSelect('tier', MF.tiers||[]);
+    document.getElementById('count').textContent = '加载 '+(MF.total||0).toLocaleString()+' 个职位…';
+    await loadShard();                       // shard 0 → instant first paint
+    ['q','minsal'].forEach(id=> document.getElementById(id).addEventListener('input', applyFilters));
+    ['country','industry','tier','sort'].forEach(id=> document.getElementById(id).addEventListener('change', applyFilters));
+    ['jr','newonly','soononly'].forEach(id=> document.getElementById(id).addEventListener('change', applyFilters));
+    applyFilters();
+    backgroundLoad();                        // stream the rest without blocking
+  }catch(e){
+    document.getElementById('count').textContent = '加载失败：'+e;
+  }
+}
+boot();
+</script>
+</body></html>
